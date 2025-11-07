@@ -20,15 +20,12 @@ public class DataCompareApp {
     private static final String TABLE_B = "product_b";
 
     // 批量大小
-    private static final int BATCH_SIZE = 10000;
+    private static final int BATCH_SIZE = 100000;
     // 线程池大小
-    private static final int THREAD_POOL_SIZE = Runtime.getRuntime().availableProcessors() * 2;
+    private static final int THREAD_POOL_SIZE = 16;
 
     public static void main(String[] args) throws Exception {
         long startTime = System.currentTimeMillis();
-
-        // 创建线程池
-        ExecutorService executor = Executors.newFixedThreadPool(THREAD_POOL_SIZE);
 
         try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD)) {
             // 获取表的总行数
@@ -38,43 +35,44 @@ public class DataCompareApp {
             logger.info("表 {} 共有 {} 条记录", TABLE_A, totalRowsA);
             logger.info("表 {} 共有 {} 条记录", TABLE_B, totalRowsB);
 
-            // 计算需要多少批次
-            int batchesA = (int) Math.ceil((double) totalRowsA / BATCH_SIZE);
-            int batchesB = (int) Math.ceil((double) totalRowsB / BATCH_SIZE);
+            // 查询所有数据并存储到Map中
+            Map<String, Product> mapA = queryAll(conn, TABLE_A);
+            Map<String, Product> mapB = queryAll(conn, TABLE_B);
 
-            // 并行处理数据比对
-            List<Future<CompareResult>> futures = new ArrayList<>();
+            logger.info("数据查询完成！耗时: {} 毫秒", System.currentTimeMillis() - startTime);
 
-            // 处理表A的每个批次
-            for (int i = 0; i < batchesA; i++) {
-                long offset = i * BATCH_SIZE;
-                futures.add(executor.submit(() -> compareBatch(conn, TABLE_A, TABLE_B, offset, BATCH_SIZE)));
-            }
+            // 比对数据
+            CompareResult result = new CompareResult();
 
-            // 处理表B中可能超出表A的批次
-            if (batchesB > batchesA) {
-                for (int i = batchesA; i < batchesB; i++) {
-                    long offset = i * BATCH_SIZE;
-                    futures.add(executor.submit(() -> compareBatch(conn, TABLE_A, TABLE_B, offset, BATCH_SIZE)));
+            // 查找表A独有的记录和匹配但不相同的记录
+            for (Map.Entry<String, Product> entry : mapA.entrySet()) {
+                String id = entry.getKey();
+                Product productA = entry.getValue();
+
+                if (!mapB.containsKey(id)) {
+                    result.incrementOnlyInA();
+                } else {
+                    Product productB = mapB.get(id);
+                    if (!productA.equals(productB)) {
+                        result.incrementMismatched();
+                    } else {
+                        result.incrementMatchedCount();
+                    }
+                    // 从mapB中移除已处理的记录
+                    mapB.remove(id);
                 }
             }
 
-            // 收集比对结果
-            CompareResult totalResult = new CompareResult();
-            for (Future<CompareResult> future : futures) {
-                CompareResult result = future.get();
-                totalResult.add(result);
-            }
+            // 剩下的mapB中的记录都是表B独有的
+            result.incrementOnlyInB(mapB.size());
 
             // 输出结果
             logger.info("比对完成！总耗时: {} 毫秒", System.currentTimeMillis() - startTime);
-            logger.info("匹配的记录数: {}", totalResult.getMatchedCount());
-            logger.info("表A独有的记录数: {}", totalResult.getOnlyInA());
-            logger.info("表B独有的记录数: {}", totalResult.getOnlyInB());
-            logger.info("不匹配的记录数: {}", totalResult.getMismatched());
+            logger.info("匹配的记录数: {}", result.getMatchedCount());
+            logger.info("表A独有的记录数: {}", result.getOnlyInA());
+            logger.info("表B独有的记录数: {}", result.getOnlyInB());
+            logger.info("不匹配的记录数: {}", result.getMismatched());
 
-        } finally {
-            executor.shutdown();
         }
     }
 
@@ -134,7 +132,7 @@ public class DataCompareApp {
     private static Map<String, Product> queryBatch(Connection conn, String tableName, long offset, int limit) throws SQLException {
         Map<String, Product> result = new HashMap<>();
 
-        String sql = "SELECT id, name, price, category, create_time FROM " + tableName + " LIMIT ? OFFSET ?";
+        String sql = "SELECT id, name, price FROM " + tableName + " ORDER BY id LIMIT ? OFFSET ?";
         try (PreparedStatement pstmt = conn.prepareStatement(sql)) {
             pstmt.setInt(1, limit);
             pstmt.setLong(2, offset);
@@ -144,10 +142,29 @@ public class DataCompareApp {
                     product.setId(rs.getString("id"));
                     product.setName(rs.getString("name"));
                     product.setPrice(rs.getBigDecimal("price"));
-                    product.setCategory(rs.getString("category"));
-                    product.setCreateTime(rs.getTimestamp("create_time"));
                     result.put(product.getId(), product);
                 }
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * 查询所有数据
+     */
+    private static Map<String, Product> queryAll(Connection conn, String tableName) throws SQLException {
+        Map<String, Product> result = new HashMap<>();
+
+        String sql = "SELECT id, name, price FROM " + tableName;
+        try (Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) {
+                Product product = new Product();
+                product.setId(rs.getString("id"));
+                product.setName(rs.getString("name"));
+                product.setPrice(rs.getBigDecimal("price"));
+                result.put(product.getId(), product);
             }
         }
 
